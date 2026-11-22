@@ -1,27 +1,19 @@
 name: altare-grab
 
 on:
-  schedule:
-    # 每 30 分钟尝试一次，避开整点/半点的调度高峰；私有仓库每月约 1440 分钟
-    - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      location:
-        description: "Altare 区域代码（us-lax = 洛杉矶，fi-hel = 赫尔辛基）"
-        required: false
-        default: "us-lax"
-
-permissions:
-  contents: read
 
 concurrency:
   group: altare-grab
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   grab:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 350
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,10 +23,13 @@ jobs:
           ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          LOCATION: ${{ github.event.inputs.location || 'us-lax' }}
-          SERVER_NAME: yg-ubuntu
+          GH_PAT: ${{ secrets.GH_PAT }}
+          LOCATION: us-lax
+          NAME: yg-ubuntu
           EGG_ID: "46"
           MEMORY_MB: "4096"
           DISK_MB: "40960"
           CPU_PERCENT: "125"
+          LOOP_SECONDS: "20400"
+          INTERVAL_SECONDS: "40"
         run: python3 grab.py
