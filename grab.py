@@ -1,182 +1,221 @@
 #!/usr/bin/env python3
-"""Altare 免费服务器抢占脚本 —— 在 GitHub Actions 上定时运行。
+"""Altare free-server grabber.
 
-逻辑：
-1. 先查团队现有服务器，已有则直接退出（避免多开）。
-2. 没有则按指定区域/配置发创建请求。
-3. 创建成功或失败都写 GitHub Step Summary；可选 PushPlus 微信通知。
+Runs one long-lived GitHub Actions job that polls for capacity, creates the
+server when a slot appears, and re-dispatches itself before exiting so the
+loop keeps going without any local machine being involved.
 """
 import json
 import os
-import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 
-API = os.environ.get("ALTARE_API", "https://console.altare.gg/api")
-TEAM = os.environ.get("ALTARE_TEAM_ID", "b7c7ee88-2a44-4c15-9feb-a6368744d6ba")
-TOKEN = os.environ.get("ALTARE_TOKEN", "").strip()
-PASSWORD = os.environ.get("SSH_PASSWORD", "").strip()
-NAME = os.environ.get("SERVER_NAME", "yg-ubuntu")
-LOCATION = os.environ.get("LOCATION", "us-lax").strip() or "us-lax"
-EGG_ID = int(os.environ.get("EGG_ID", "46"))
-MEMORY_MB = int(os.environ.get("MEMORY_MB", "4096"))
-DISK_MB = int(os.environ.get("DISK_MB", "40960"))
-CPU_PERCENT = int(os.environ.get("CPU_PERCENT", "125"))
+TEAM_ID = os.environ.get("ALTARE_TEAM_ID", "b7c7ee88-2a44-4c15-9feb-a6368744d6ba")
+TOKEN = os.environ["ALTARE_TOKEN"].strip()
+SSH_PASSWORD = os.environ["SSH_PASSWORD"].strip()
+NAME = os.environ.get("ALTARE_NAME", "yg-ubuntu")
+LOCATION = os.environ.get("ALTARE_LOCATION", "us-lax")
+EGG_ID = int(os.environ.get("ALTARE_EGG_ID", "46"))
+MEMORY_MB = int(os.environ.get("ALTARE_MEMORY_MB", "4096"))
+CPU_PERCENT = int(os.environ.get("ALTARE_CPU_PERCENT", "125"))
+DISK_MB = int(os.environ.get("ALTARE_DISK_MB", "40960"))
+LOOP_SECONDS = int(os.environ.get("LOOP_SECONDS", "20400"))
+INTERVAL = int(os.environ.get("INTERVAL_SECONDS", "40"))
+PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "").strip()
+GH_PAT = os.environ.get("GH_PAT", "").strip()
+GH_REPO = os.environ.get("GITHUB_REPOSITORY", "").strip()
+GH_WORKFLOW = os.environ.get("GH_WORKFLOW_FILE", "grab.yml")
+
+BASE = "https://console.altare.gg/api"
+HEADERS = {
+    "Authorization": "Bearer " + TOKEN,
+    "Accept": "application/json",
+    "User-Agent": "altare-grab/1.0",
+}
 
 
 def log(msg):
     print(msg, flush=True)
 
 
-def summary(md):
-    log(md)
+def summary(msg):
+    log(msg)
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(md + "\n")
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(msg + "\n")
+        except OSError:
+            pass
 
 
-def request(method, path, body=None, extra_headers=None, timeout=45):
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method)
-    req.add_header("Authorization", "Bearer " + TOKEN)
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", "altare-grab/1.0")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    for k, v in (extra_headers or {}).items():
-        req.add_header(k, v)
+def api(method, path, body=None, timeout=45):
+    data = None
+    headers = dict(HEADERS)
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
+            raw = resp.read().decode("utf-8", "replace")
+            try:
+                return resp.status, json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                return resp.status, raw
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace")
-    except Exception as exc:  # 网络层错误
-        return 0, str(exc)
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            return exc.code, json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return exc.code, raw
+    except Exception as exc:  # network error
+        return 0, {"error": str(exc)}
 
 
-def parse_items(raw):
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return []
-    if isinstance(data, list):
-        return data
+def list_servers():
+    status, data = api("GET", f"/tenants/{TEAM_ID}/servers")
+    if status != 200:
+        return None, status, data
+    items = []
     if isinstance(data, dict):
-        for key in ("items", "servers", "data"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
-    return []
+        items = data.get("items") or data.get("servers") or data.get("data") or []
+        if isinstance(items, dict):
+            items = items.get("items") or []
+    elif isinstance(data, list):
+        items = data
+    return items, status, data
 
 
-def pick(item, *keys):
-    for key in keys:
-        value = item.get(key)
-        if value not in (None, ""):
-            return value
-    return None
+def extract_net(obj):
+    found = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                low = key.lower()
+                if low in ("ip", "ipaddress", "ip_address", "address") and isinstance(value, str) and value and "ip" not in found:
+                    found["ip"] = value
+                if low in ("port", "portnumber") and isinstance(value, (int, str)) and "port" not in found:
+                    found["port"] = value
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(obj)
+    return found
 
 
-def describe(items):
-    lines = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        name = pick(item, "name", "identifier", "id")
-        host = pick(item, "ip", "ipAddress", "ip_address", "host", "hostname", "node")
-        port = pick(item, "port", "sshPort", "ssh_port")
-        status = pick(item, "status", "state")
-        lines.append(f"- `{name}` | host={host} | port={port} | status={status}")
-    return "\n".join(lines) if lines else "- （无法解析条目字段）"
-
-
-def notify(title, content):
-    token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
-    if not token:
+def pushplus(title, content):
+    if not PUSHPLUS_TOKEN:
         return
+    payload = json.dumps({"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "txt"}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://www.pushplus.plus/send",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": "altare-grab/1.0"},
+    )
     try:
-        payload = json.dumps({"token": token, "title": title, "content": content}).encode()
-        req = urllib.request.Request("https://www.pushplus.plus/send", data=payload, method="POST")
-        req.add_header("Content-Type", "application/json")
-        urllib.request.urlopen(req, timeout=15).read()
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            log("pushplus -> HTTP %s" % resp.status)
     except Exception as exc:
-        log(f"PushPlus 推送失败：{exc}")
+        log("pushplus failed: %s" % exc)
+
+
+def trigger_next():
+    if not GH_PAT or not GH_REPO:
+        log("next run not triggered: GH_PAT or repo missing")
+        return False
+    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{GH_WORKFLOW}/dispatches"
+    payload = json.dumps({"ref": "main"}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + GH_PAT,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "altare-grab/1.0",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            log(f"next run triggered -> HTTP {resp.status}")
+            return True
+    except Exception as exc:
+        log(f"next run trigger failed: {exc}")
+        return False
 
 
 def main():
-    if not TOKEN:
-        summary("## ❌ 缺少 ALTARE_TOKEN")
-        return 1
-    if not PASSWORD:
-        summary("## ❌ 缺少 SSH_PASSWORD")
-        return 1
+    summary(f"目标：{LOCATION} / {MEMORY_MB} MiB / {CPU_PERCENT}% / {DISK_MB} MiB / egg={EGG_ID}")
+    servers, status, _ = list_servers()
+    if servers:
+        names = ", ".join(str(s.get("name", s.get("id", "?"))) if isinstance(s, dict) else str(s) for s in servers)
+        summary(f"已存在服务器：{names}，跳过创建。")
+        return
 
-    log(f"目标：{LOCATION} / {MEMORY_MB} MiB / {CPU_PERCENT}% / {DISK_MB} MiB / egg={EGG_ID}")
+    deadline = time.monotonic() + LOOP_SECONDS
+    attempt = 0
+    last_note = ""
+    created = False
+    server_info = None
 
-    status, raw = request("GET", f"/tenants/{TEAM}/servers")
-    log(f"GET servers -> HTTP {status}")
-    if status != 200:
-        summary(f"## ⚠️ 查询失败 HTTP {status}\n```\n{raw[:800]}\n```")
-        return 0
-
-    items = parse_items(raw)
-    if items:
-        summary("## ✅ 已有服务器，无需创建\n" + describe(items))
-        log(json.dumps(items, ensure_ascii=False)[:2000])
-        return 0
-
-    body = {
-        "name": NAME,
-        "eggId": EGG_ID,
-        "memoryMb": MEMORY_MB,
-        "diskMb": DISK_MB,
-        "cpuPercent": CPU_PERCENT,
-        "location": LOCATION,
-        "ssh": {"password": PASSWORD},
-    }
-    status, raw = request(
-        "POST",
-        f"/tenants/{TEAM}/servers",
-        body,
-        {"Idempotency-Key": str(uuid.uuid4()), "Origin": "https://console.altare.gg"},
-    )
-    log(f"POST create -> HTTP {status} {raw[:500]}")
-
-    if status not in (200, 201, 202):
-        if status == 503:
-            title = "Altare 无容量（继续蹲）"
-        elif status == 429:
-            title = "Altare 限流（继续蹲）"
-        elif status == 500:
-            title = "Altare 面板繁忙（继续蹲）"
-        else:
-            title = f"创建失败 HTTP {status}"
-        summary(f"## ⏳ {title}\n```\n{raw[:800]}\n```")
-        return 0
-
-    # 创建请求已受理，轮询等待实例出现在列表里
-    final = []
-    for attempt in range(18):
-        time.sleep(10)
-        status, raw = request("GET", f"/tenants/{TEAM}/servers")
-        items = parse_items(raw)
-        if items:
-            final = items
+    while time.monotonic() < deadline:
+        attempt += 1
+        servers, status, _ = list_servers()
+        if servers:
+            created = True
+            server_info = servers[0]
+            summary(f"第 {attempt} 轮发现服务器已存在：{json.dumps(server_info, ensure_ascii=False)[:800]}")
             break
-        log(f"等待实例上线…… {attempt + 1}/18")
+        if status not in (200, 0):
+            log(f"attempt={attempt} GET servers -> HTTP {status}")
 
-    if final:
-        md = "## 🎉 服务器创建成功\n" + describe(final) + "\n\n```json\n" + json.dumps(final, ensure_ascii=False, indent=2)[:3000] + "\n```"
-        summary(md)
-        notify("Altare 服务器已创建", describe(final))
-    else:
-        summary("## ⚠️ 创建请求已受理，但列表暂未返回实例（可能仍在部署）\n```\n" + raw[:800] + "\n```")
-        notify("Altare 创建请求已受理", "实例尚未出现在列表中，请查看 Actions 日志。")
-    return 0
+        body = {
+            "name": NAME,
+            "eggId": EGG_ID,
+            "memoryMb": MEMORY_MB,
+            "diskMb": DISK_MB,
+            "cpuPercent": CPU_PERCENT,
+            "location": LOCATION,
+            "ssh": {"password": SSH_PASSWORD},
+        }
+        code, data = api("POST", f"/tenants/{TEAM_ID}/servers", body)
+        note = json.dumps(data, ensure_ascii=False)[:200] if isinstance(data, (dict, list)) else str(data)[:200]
+        if code in (200, 201):
+            summary(f"第 {attempt} 轮创建成功：HTTP {code} {note}")
+            created = True
+            server_info = data
+            time.sleep(10)
+            servers, _, _ = list_servers()
+            if servers:
+                server_info = servers[0]
+            break
+        if note != last_note:
+            log(f"attempt={attempt} POST create -> HTTP {code} {note}")
+            last_note = note
+        elif attempt % 30 == 0:
+            log(f"attempt={attempt} still no capacity (HTTP {code})")
+
+        time.sleep(INTERVAL)
+
+    if created and server_info is not None:
+        net = extract_net(server_info)
+        detail = json.dumps(server_info, ensure_ascii=False)
+        summary("服务器信息：" + detail[:1500])
+        pushplus("Altare 服务器已创建", f"名称：{NAME}\n位置：{LOCATION}\nIP：{net.get('ip', '未解析')}\n端口：{net.get('port', '未解析')}\n\n{detail[:1200]}")
+        summary("已创建成功，停止接力。")
+        return
+
+    summary(f"运行期满（{attempt} 次尝试）未抢到，触发下一轮。")
+    trigger_next()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
