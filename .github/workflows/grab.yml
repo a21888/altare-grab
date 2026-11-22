@@ -3,7 +3,7 @@ name: altare-grab
 on:
   schedule:
     # 每 30 分钟尝试一次，避开整点/半点的调度高峰；私有仓库每月约 1440 分钟
-    - cron: "7,37 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       location:
