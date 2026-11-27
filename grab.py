@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
-TEAM_ID = os.environ.get("ALTARE_TEAM_ID", "b7c7ee88-2a44-4c15-9feb-a6368744d6ba")
+TEAM_ID = os.environ.get("ALTARE_TEAM_ID", "c8046796-13c2-4bfb-9465-71cb72348ac8")
 TOKEN = os.environ["ALTARE_TOKEN"].strip()
 SSH_PASSWORD = os.environ["SSH_PASSWORD"].strip()
 NAME = os.environ.get("ALTARE_NAME", "yg-ubuntu")
