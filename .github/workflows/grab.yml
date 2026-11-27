@@ -21,15 +21,15 @@ jobs:
       - name: Grab server
         env:
           ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
+          ALTARE_TEAM_ID: ${{ vars.ALTARE_TEAM_ID }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          LOCATION: sg
-          NAME: pao
-          EGG_ID: "46"
-          MEMORY_MB: "4096"
-          DISK_MB: "40960"
-          CPU_PERCENT: "125"
+          ALTARE_LOCATION: sg
+          ALTARE_NAME: pao
+          ALTARE_EGG_ID: "46"
+          ALTARE_MEMORY_MB: "4096"
+          ALTARE_DISK_MB: "40960"
+          ALTARE_CPU_PERCENT: "125"
           LOOP_SECONDS: "20400"
           INTERVAL_SECONDS: "40"
         run: python3 grab.py
