@@ -21,7 +21,7 @@ jobs:
       - name: Grab server
         env:
           ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
-          ALTARE_TEAM_ID: ${{ vars.ALTARE_TEAM_ID }}
+          ALTARE_TEAM_ID: ${{ secrets.ALTARE_TEAM_ID }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           ALTARE_LOCATION: sg
