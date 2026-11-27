@@ -23,13 +23,16 @@ jobs:
           ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
           ALTARE_TEAM_ID: ${{ secrets.ALTARE_TEAM_ID }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           ALTARE_LOCATION: "sg-sgp"
-          ALTARE_NAME: pao
+          ALTARE_LOCATIONS_PATH: "/core/locations"
+          ALTARE_NAME: "pao"
           ALTARE_EGG_ID: "46"
           ALTARE_MEMORY_MB: "4096"
           ALTARE_DISK_MB: "40960"
           ALTARE_CPU_PERCENT: "125"
           LOOP_SECONDS: "20400"
-          INTERVAL_SECONDS: "40"
+          INTERVAL_SECONDS: "15"
         run: python3 grab.py
